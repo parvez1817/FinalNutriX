@@ -1,0 +1,31 @@
+[project]
+name = "nutrix"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "ParvezAhamed7", email = "parvezahamed700@gamil.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.9",
+    "docx2txt>=0.9",
+    "fastapi>=0.141.1",
+    "langchain>=1.4.0",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.4.2",
+    "langchain-core>=1.6.2",
+    "langchain-google-genai>=4.4.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "langgraph>=1.2.11",
+    "httpx>=0.28.0",
+    "motor>=3.7.1",
+    "mcp>=1.0.0",
+    "pandas>=2.2.3",
+    "pypdf>=6.17.0",
+    "python-dotenv>=1.2.3",
+    "scikit-learn==1.6.1",
+    "sentence-transformers>=6.0.1",
+    "uvicorn>=0.52.4",
+]
+
