@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="NutriX API")
 bearer_scheme = HTTPBearer(auto_error=False)
 
+# Use one configured Gemini model consistently across NutriX features.
+GEMINI_MODEL = "gemini-3.8-flash"
+
 
 @app.exception_handler(PyMongoError)
 async def handle_database_error(request: Request, exc: PyMongoError):
@@ -54,12 +57,14 @@ async def handle_database_error(request: Request, exc: PyMongoError):
         content={"detail": "Database unavailable. Check MONGO_URI and MongoDB network access."},
     )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ── Models ──────────────────────────────────────────────────────────────────
 class SignupRequest(BaseModel):
@@ -91,9 +96,11 @@ class SignupRequest(BaseModel):
             raise ValueError("Password must be at least 8 characters")
         return value
 
+
 class LoginRequest(BaseModel):
     email: str
     password: str
+
 
 class FoodItemInput(BaseModel):
     name: str
@@ -114,6 +121,8 @@ class ChatRequest(BaseModel):
 
 
 class ConversationRequest(BaseModel):
+    # Retained for compatibility with the current frontend payload.
+    # Ownership is always taken from the authenticated token, never this field.
     email: str
     title: str = "New conversation"
     messages: list[dict] = Field(default_factory=list)
@@ -157,6 +166,7 @@ async def authenticated_user(
 ) -> dict:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authentication required")
+
     token_hash = hashlib.sha256(credentials.credentials.encode("utf-8")).hexdigest()
     user = await users_collection.find_one({"auth_token_hash": token_hash})
     if user is None:
@@ -164,9 +174,9 @@ async def authenticated_user(
     return user
 
 
-# ── LLM for image recognition ──────────────────────────────────────────────
+# ── LLM ─────────────────────────────────────────────────────────────────────
 vision_llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model=GEMINI_MODEL,
     temperature=0.3,
 )
 
@@ -217,17 +227,12 @@ async def optimize(
                 logger.exception("Optimization graph failed")
                 yield {"__error__": "Optimization failed. Check the backend logs for details."}
 
-        # Stream status messages without adding artificial latency.
         yield sse_event("status", {"step": "typing", "message": "🔍 Typing..."})
-
         yield sse_event("status", {"step": "validating", "message": "✅ Validating your input..."})
 
         async for event in graph_events():
             if event.get("__error__"):
-                yield sse_event(
-                    "error",
-                    event["__error__"],
-                )
+                yield sse_event("error", event["__error__"])
                 return
 
             for node_name, node_output in event.items():
@@ -253,11 +258,11 @@ async def optimize(
                 elif node_name == "recommend":
                     recommendation = node_output.get("recommendation", "")
 
-                    # If language is not English, translate the recommendation
                     if language.lower() != "english":
                         yield sse_event("status", {"step": "translating", "message": f"🌐 Translating to {language}..."})
                         translate_llm = ChatGoogleGenerativeAI(
-                            model="gemini-2.5-flash", temperature=0.3
+                            model=GEMINI_MODEL,
+                            temperature=0.3,
                         )
                         translated = translate_llm.invoke(
                             f"Translate the following nutrition recommendation to {language}. "
@@ -302,7 +307,7 @@ async def chat_endpoint(
         )
 
     langchain_msgs = [SystemMessage(content=sys_prompt)]
-    
+
     for msg in request.messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
@@ -310,14 +315,17 @@ async def chat_endpoint(
             langchain_msgs.append(HumanMessage(content=content))
         elif role == "assistant":
             langchain_msgs.append(AIMessage(content=content))
-            
+
     response = vision_llm.invoke(langchain_msgs)
     return {"reply": response.content}
 
 
 # ── Image recognition endpoint ─────────────────────────────────────────────
 @app.post("/api/recognize-food")
-async def recognize_food(file: UploadFile = File(...)):
+async def recognize_food(
+    file: UploadFile = File(...),
+    user: dict = Depends(authenticated_user),
+):
     """Extract menu items and prices from an uploaded menu image."""
     allowed_content_types = {"image/jpeg", "image/png", "image/webp"}
     if file.content_type not in allowed_content_types:
@@ -358,7 +366,6 @@ async def recognize_food(file: UploadFile = File(...)):
     response = vision_llm.invoke([message])
     text = response.content.strip()
 
-    # Clean markdown code fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
         if text.endswith("```"):
@@ -395,8 +402,7 @@ async def recognize_food(file: UploadFile = File(...)):
     return {"items": items}
 
 
-# ── Auth endpoints ─────────────────────────────────────────────────────────
-
+# ── Database and auth endpoints ────────────────────────────────────────────
 client = motor.motor_asyncio.AsyncIOMotorClient(
     os.environ["MONGO_URI"], serverSelectionTimeoutMS=5000
 )
@@ -433,16 +439,18 @@ async def issue_auth_token(user_id) -> str:
     )
     return token
 
+
 @app.post("/api/auth/signup")
 async def register(req: SignupRequest):
-    existing = await users_collection.find_one({"email": req.email})
+    email = req.email.strip().lower()
+    existing = await users_collection.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="User with this email already exists")
-    
-    hashed_pwd = bcrypt.hashpw(req.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    hashed_pwd = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     new_user = {
-        "name": req.name,
-        "email": req.email,
+        "name": req.name.strip(),
+        "email": email,
         "password": hashed_pwd,
         "date_of_birth": req.date_of_birth.isoformat(),
         "weight_kg": req.weight_kg,
@@ -450,21 +458,23 @@ async def register(req: SignupRequest):
     }
     result = await users_collection.insert_one(new_user)
     token = await issue_auth_token(result.inserted_id)
-    
+
     return {
         "token": token,
         "user": profile_response(new_user),
     }
 
+
 @app.post("/api/auth/login")
 async def login_route(req: LoginRequest):
-    user = await users_collection.find_one({"email": req.email})
+    email = req.email.strip().lower()
+    user = await users_collection.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    if not bcrypt.checkpw(req.password.encode('utf-8'), user["password"].encode('utf-8')):
+
+    if not bcrypt.checkpw(req.password.encode("utf-8"), user["password"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-        
+
     token = await issue_auth_token(user["_id"])
     return {"token": token, "user": profile_response(user)}
 
@@ -489,58 +499,7 @@ async def update_profile(
     return profile_response({**user, **updated})
 
 
-@app.get("/api/conversations")
-async def list_conversations(email: str = Query(..., min_length=3)):
-    """Return the signed-in user's saved conversations, newest first."""
-    conversations = conversations_collection.find(
-        {"email": email.strip().lower()},
-        {"messages": 1, "title": 1, "createdAt": 1, "updatedAt": 1},
-    ).sort("updatedAt", -1)
-    return {
-        "conversations": [
-            {
-                "id": str(conversation["_id"]),
-                "title": conversation_title(
-                    conversation.get("title", ""),
-                    conversation.get("messages", []),
-                ),
-                "createdAt": conversation.get("createdAt"),
-                "updatedAt": conversation.get("updatedAt"),
-            }
-            async for conversation in conversations
-        ]
-    }
-
-
-@app.get("/api/conversations/{conversation_id}")
-async def get_conversation(
-    conversation_id: str,
-    email: str = Query(..., min_length=3),
-):
-    """Fetch one conversation only when it belongs to the supplied email."""
-    from bson import ObjectId
-
-    if not ObjectId.is_valid(conversation_id):
-        raise HTTPException(status_code=400, detail="Invalid conversation id")
-
-    conversation = await conversations_collection.find_one(
-        {
-            "_id": ObjectId(conversation_id),
-            "email": email.strip().lower(),
-        }
-    )
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    return {
-        "id": str(conversation["_id"]),
-        "title": conversation.get("title", "New conversation"),
-        "createdAt": conversation.get("createdAt"),
-        "updatedAt": conversation.get("updatedAt"),
-        "messages": conversation.get("messages", []),
-    }
-
-
+# ── Conversation endpoints ─────────────────────────────────────────────────
 def conversation_title(title: str, messages: list[dict]) -> str:
     """Derive a useful title for old conversations with generic saved titles."""
     if title.strip() and title.strip().lower() not in {
@@ -600,12 +559,70 @@ def conversation_title(title: str, messages: list[dict]) -> str:
     return "New conversation"
 
 
+@app.get("/api/conversations")
+async def list_conversations(
+    user: dict = Depends(authenticated_user),
+):
+    """Return only the authenticated user's saved conversations, newest first."""
+    owner_email = user["email"].strip().lower()
+    conversations = conversations_collection.find(
+        {"email": owner_email},
+        {"messages": 1, "title": 1, "createdAt": 1, "updatedAt": 1},
+    ).sort("updatedAt", -1)
+
+    return {
+        "conversations": [
+            {
+                "id": str(conversation["_id"]),
+                "title": conversation_title(
+                    conversation.get("title", ""),
+                    conversation.get("messages", []),
+                ),
+                "createdAt": conversation.get("createdAt"),
+                "updatedAt": conversation.get("updatedAt"),
+            }
+            async for conversation in conversations
+        ]
+    }
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    user: dict = Depends(authenticated_user),
+):
+    """Fetch a conversation only if it belongs to the authenticated user."""
+    from bson import ObjectId
+
+    if not ObjectId.is_valid(conversation_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation id")
+
+    owner_email = user["email"].strip().lower()
+    conversation = await conversations_collection.find_one(
+        {"_id": ObjectId(conversation_id), "email": owner_email}
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return {
+        "id": str(conversation["_id"]),
+        "title": conversation.get("title", "New conversation"),
+        "createdAt": conversation.get("createdAt"),
+        "updatedAt": conversation.get("updatedAt"),
+        "messages": conversation.get("messages", []),
+    }
+
+
 @app.post("/api/conversations")
-async def create_conversation(req: ConversationRequest):
-    """Create a conversation owned by the supplied email address."""
+async def create_conversation(
+    req: ConversationRequest,
+    user: dict = Depends(authenticated_user),
+):
+    """Create a conversation owned by the authenticated user."""
     now = datetime.now(timezone.utc)
+    owner_email = user["email"].strip().lower()
     result = await conversations_collection.insert_one({
-        "email": req.email.strip().lower(),
+        "email": owner_email,
         "title": req.title.strip() or "New conversation",
         "messages": req.messages,
         "createdAt": now,
@@ -615,26 +632,26 @@ async def create_conversation(req: ConversationRequest):
 
 
 @app.put("/api/conversations/{conversation_id}")
-async def update_conversation(conversation_id: str, req: ConversationRequest):
-    """Update messages only when the conversation belongs to the supplied email."""
+async def update_conversation(
+    conversation_id: str,
+    req: ConversationRequest,
+    user: dict = Depends(authenticated_user),
+):
+    """Update a conversation only if it belongs to the authenticated user."""
     from bson import ObjectId
 
     if not ObjectId.is_valid(conversation_id):
         raise HTTPException(status_code=400, detail="Invalid conversation id")
 
     now = datetime.now(timezone.utc)
+    owner_email = user["email"].strip().lower()
     result = await conversations_collection.update_one(
-        {
-            "_id": ObjectId(conversation_id),
-            "email": req.email.strip().lower(),
-        },
-        {
-            "$set": {
-                "title": req.title.strip() or "New conversation",
-                "messages": req.messages,
-                "updatedAt": now,
-            }
-        },
+        {"_id": ObjectId(conversation_id), "email": owner_email},
+        {"$set": {
+            "title": req.title.strip() or "New conversation",
+            "messages": req.messages,
+            "updatedAt": now,
+        }},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -644,25 +661,28 @@ async def update_conversation(conversation_id: str, req: ConversationRequest):
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
-    email: str = Query(..., min_length=3),
+    user: dict = Depends(authenticated_user),
 ):
-    """Delete only the signed-in user's selected conversation."""
+    """Delete a conversation only if it belongs to the authenticated user."""
     from bson import ObjectId
 
     if not ObjectId.is_valid(conversation_id):
         raise HTTPException(status_code=400, detail="Invalid conversation id")
 
+    owner_email = user["email"].strip().lower()
     result = await conversations_collection.delete_one(
-        {
-            "_id": ObjectId(conversation_id),
-            "email": email.strip().lower(),
-        }
+        {"_id": ObjectId(conversation_id), "email": owner_email}
     )
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"ok": True}
 
+
 # ── Serve static files (frontend) ──────────────────────────────────────────
-static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")
+static_dir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "frontend",
+    "dist",
+)
 os.makedirs(static_dir, exist_ok=True)
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

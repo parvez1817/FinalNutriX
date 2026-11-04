@@ -23,9 +23,39 @@ from langgraph.graph import END, StateGraph
 
 load_dotenv()
 
+import sys
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+
+
+class ScalingProteinRegressor(BaseEstimator, RegressorMixin):
+    """
+    Wraps an sklearn pipeline.
+    Predicts absolute 'protein_g' automatically based on serving_size_g.
+    """
+
+    def __init__(self, base_pipeline=None):
+        self.base_pipeline = base_pipeline
+
+    def fit(self, X, y):
+        self.pipeline_ = clone(self.base_pipeline)
+        serving_scale = X["serving_size_g"] / 100.0
+        y_norm = y / serving_scale
+        self.pipeline_.fit(X, y_norm)
+        return self
+
+    def predict(self, X):
+        serving_scale = X["serving_size_g"] / 100.0
+        y_pred_norm = self.pipeline_.predict(X)
+        return y_pred_norm * serving_scale
+
+
+# Register the class to __main__ so joblib can find it during unpickling.
+setattr(sys.modules["__main__"], "ScalingProteinRegressor", ScalingProteinRegressor)
+
 
 # ── Protein prediction model ───────────────────────────────────────────────
-MODEL_PATH = Path(__file__).resolve().parents[1] / "protein_predictor.joblib"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = PROJECT_ROOT / "protein_predictor_2.joblib"
 _protein_model: Any | None = None
 DEFAULT_SERVING_SIZE_G = 180.0
 
@@ -149,68 +179,30 @@ NON_VEGETARIAN_FOOD_PATTERN = re.compile(
 
 ALLERGY_FOOD_ALIASES = {
     "dairy": {
-        "milk",
-        "buttermilk",
-        "cheese",
-        "butter",
-        "cream",
-        "paneer",
-        "yogurt",
-        "curd",
-        "whey",
+        "milk", "buttermilk", "cheese", "butter", "cream", "paneer",
+        "yogurt", "curd", "whey",
     },
     "gluten": {
-        "wheat",
-        "barley",
-        "rye",
-        "atta",
-        "maida",
-        "bread",
-        "roti",
-        "naan",
-        "pasta",
+        "wheat", "barley", "rye", "atta", "maida", "bread", "roti",
+        "naan", "pasta",
     },
     "milk": {
-        "dairy",
-        "buttermilk",
-        "cheese",
-        "butter",
-        "cream",
-        "paneer",
-        "yogurt",
-        "curd",
-        "whey",
+        "dairy", "buttermilk", "cheese", "butter", "cream", "paneer",
+        "yogurt", "curd", "whey",
     },
     "nuts": {
-        "peanut",
-        "groundnut",
-        "almond",
-        "cashew",
-        "walnut",
-        "pistachio",
-        "hazelnut",
-        "pecan",
+        "peanut", "groundnut", "almond", "cashew", "walnut",
+        "pistachio", "hazelnut", "pecan",
     },
     "peanut": {"groundnut"},
     "peanuts": {"groundnut"},
     "shellfish": {
-        "shrimp",
-        "prawn",
-        "crab",
-        "lobster",
-        "clam",
-        "oyster",
-        "mussel",
+        "shrimp", "prawn", "crab", "lobster", "clam", "oyster", "mussel",
     },
     "soy": {"soya", "tofu"},
     "soya": {"soy", "tofu"},
     "tree nuts": {
-        "almond",
-        "cashew",
-        "walnut",
-        "pistachio",
-        "hazelnut",
-        "pecan",
+        "almond", "cashew", "walnut", "pistachio", "hazelnut", "pecan",
     },
     "wheat": {"atta", "maida"},
 }
@@ -265,9 +257,7 @@ def parse_input(state: GraphState) -> dict[str, Any]:
     protein_target = float(state["protein_target"])
 
     if not menu:
-        raise ValueError(
-            "No menu items remain after applying allergen exclusions."
-        )
+        raise ValueError("No menu items remain after applying allergen exclusions.")
     if budget <= 0:
         raise ValueError("Budget must be positive.")
     if protein_target <= 0:
@@ -294,7 +284,6 @@ def optimize(state: GraphState) -> dict[str, Any]:
     protein_target = state["protein_target"]
     estimates = state["protein_estimates"]
 
-    # Filter items according to preference
     if dietary_pref == "VEG":
         eligible_items = [i for i in menu if not is_non_vegetarian(i)]
     elif dietary_pref == "NON-VEG":
@@ -306,8 +295,8 @@ def optimize(state: GraphState) -> dict[str, Any]:
     food_names = list(item_lookup.keys())
     valid_combos: list[Combination] = []
 
-    # Strict combinations (unique items per plate, 1 to len(items))
-    for r in range(1, len(food_names) + 1):
+    max_items_per_meal = min(3, len(food_names))
+    for r in range(1, max_items_per_meal + 1):
         for combo_names in combinations(food_names, r):
             if dietary_pref == "NON-VEG" and not any(
                 is_non_vegetarian(item_lookup[n]) for n in combo_names
@@ -349,12 +338,10 @@ def optimize(state: GraphState) -> dict[str, Any]:
             "valid_combinations": [],
         }
 
-    # 1. Cheapest option meeting target: total_protein >= protein_target
     target_reaching = [
         c for c in valid_combos if c["total_protein"] >= protein_target
     ]
     if target_reaching:
-        # Minimum cost first, tie-break by higher protein, then fewer items
         target_reaching.sort(
             key=lambda c: (c["total_cost"], -c["total_protein"], len(c["items"]))
         )
@@ -364,7 +351,6 @@ def optimize(state: GraphState) -> dict[str, Any]:
         cheapest_reaching = None
         status = "TARGET_UNMET"
 
-    # 2. Maximum protein combination within budget
     valid_combos.sort(
         key=lambda c: (-c["total_protein"], c["total_cost"], len(c["items"]))
     )
@@ -378,59 +364,146 @@ def optimize(state: GraphState) -> dict[str, Any]:
     }
 
 
-# ── Node 4: Build Recommendation ───────────────────────────────────────────
-def format_item_line(item: dict[str, Any]) -> str:
-    link_part = f" [Order: {item['order_link']}]" if item.get("order_link") else ""
-    return (
-        f"- {item['name']} (₹{item['price']:.0f}, {item['protein']:.1f}g protein) "
-        f"— Source: {item.get('protein_source', 'Standard')}{link_part}"
-    )
-
+# ── Node 4: Build Human-Friendly Recommendation ────────────────────────────
 
 def recommend(state: GraphState) -> dict[str, Any]:
-    """Generate final response deterministically from state without halluncinations."""
+    """Generate a detailed, friendly meal recommendation."""
+
     status = state.get("status", "NO_BUDGET")
     budget = state["budget"]
     protein_target = state["protein_target"]
+
     best_combo = state.get("best_combination")
     cheapest = state.get("cheapest_reaching")
 
     if status == "NO_BUDGET" or not best_combo:
         return {
             "recommendation": (
-                f"Status: NO_COMBINATION_WITHIN_BUDGET\n"
-                f"No items or combinations were found within your budget of ₹{budget:.0f}. "
-                f"Try increasing your budget or reviewing menu constraints."
+                f"I couldn't find a suitable combination within your "
+                f"₹{budget:.0f} budget.\n\n"
+                "You could try increasing your budget or adding more "
+                "food options to the menu."
             )
         }
 
-    # Primary recommendation is the cheapest option meeting the goal
-    chosen = cheapest if (status == "GOAL_MET" and cheapest) else best_combo
-    chosen_items_text = "\n".join(format_item_line(i) for i in chosen["item_details"])
-    left_in_budget = budget - chosen["total_cost"]
+    chosen = cheapest if status == "GOAL_MET" and cheapest else best_combo
 
-    lines = [
-        f"**Status**: {status}",
-        f"**Chosen Option** (Recommended):",
-        chosen_items_text,
-        f"- **Total Cost**: ₹{chosen['total_cost']:.0f}",
-        f"- **Predicted Protein**: {chosen['total_protein']:.1f}g (Target: {protein_target:.0f}g)",
-        f"- **Left in Budget**: ₹{left_in_budget:.0f}",
-    ]
+    items = chosen["item_details"]
+    total_cost = chosen["total_cost"]
+    total_protein = chosen["total_protein"]
+    remaining = budget - total_cost
 
-    # Show highest protein alternative if different from the primary choice
-    if status == "GOAL_MET" and best_combo and best_combo["items"] != chosen["items"]:
-        lines.append("\n**Alternative (Maximum Protein within Budget)**:")
-        alt_items_text = "\n".join(
-            format_item_line(i) for i in best_combo["item_details"]
+    # Format food items on separate lines
+    food_list = "\n".join(
+        f"• {item['name']} – ₹{item['price']:.0f} "
+        f"({item['protein']:.1f}g protein)"
+        for item in items
+    )
+
+    if status == "GOAL_MET":
+
+        excess = total_protein - protein_target
+
+        message = (
+            f"Great! I've found a meal combination that fits your budget "
+            f"and meets your protein goal.\n\n"
+
+            f"Here's what I recommend:\n\n"
+            f"{food_list}\n\n"
+
+            f"Total cost: ₹{total_cost:.0f}\n"
+            f"Estimated protein: {total_protein:.1f}g\n"
+            f"Your protein target: {protein_target:.0f}g\n"
+            f"Remaining budget: ₹{remaining:.0f}\n\n"
         )
-        lines.append(alt_items_text)
-        lines.append(
-            f"- Cost: ₹{best_combo['total_cost']:.0f} | Protein: {best_combo['total_protein']:.1f}g | Left in Budget: ₹{budget - best_combo['total_cost']:.0f}"
+
+        if excess > 0:
+            message += (
+                f"This combination provides {excess:.1f}g more protein "
+                "than your target, which is a little above what you need.\n\n"
+            )
+
+        message += (
+            "You're all set! Enjoy your meal and keep working towards "
+            "your nutrition goals."
         )
 
-    recommendation = "\n".join(lines)
-    return {"recommendation": recommendation}
+    else:
+
+        shortfall = protein_target - total_protein
+
+        message = (
+            "I checked the available food options, and this is the "
+            "best combination I could find within your budget.\n\n"
+
+            f"**Here's what I recommend:**\n\n"
+            f"{food_list}\n\n"
+
+            f"Total cost: ₹{total_cost:.0f}\n"
+            f"Estimated protein: {total_protein:.1f}g\n"
+            f"Your protein target: {protein_target:.0f}g\n"
+            f"Remaining budget: ₹{remaining:.0f}\n\n"
+
+            f"This combination falls short of your target by "
+            f"{shortfall:.1f}g. You may need to increase your budget "
+            "or add more protein-rich options to reach your goal.\n\n"
+
+            "Hope this helps you make a better food choice!"
+        )
+
+    return {"recommendation": message}
+
+# # ── Node 4: Build Recommendation ───────────────────────────────────────────
+# def format_item_line(item: dict[str, Any]) -> str:
+#     link_part = f" [Order: {item['order_link']}]" if item.get("order_link") else ""
+#     return (
+#         f"- {item['name']} (₹{item['price']:.0f}, {item['protein']:.1f}g protein) "
+#         f"— Source: {item.get('protein_source', 'Standard')}{link_part}"
+#     )
+
+
+# def recommend(state: GraphState) -> dict[str, Any]:
+#     """Generate final response deterministically from state without halluncinations."""
+#     status = state.get("status", "NO_BUDGET")
+#     budget = state["budget"]
+#     protein_target = state["protein_target"]
+#     best_combo = state.get("best_combination")
+#     cheapest = state.get("cheapest_reaching")
+
+#     if status == "NO_BUDGET" or not best_combo:
+#         return {
+#             "recommendation": (
+#                 f"Status: NO_COMBINATION_WITHIN_BUDGET\n"
+#                 f"No items or combinations were found within your budget of ₹{budget:.0f}. "
+#                 f"Try increasing your budget or reviewing menu constraints."
+#             )
+#         }
+
+#     chosen = cheapest if (status == "GOAL_MET" and cheapest) else best_combo
+#     chosen_items_text = "\n".join(format_item_line(i) for i in chosen["item_details"])
+#     left_in_budget = budget - chosen["total_cost"]
+
+#     lines = [
+#         f"**Status**: {status}",
+#         f"**Chosen Option** (Recommended):",
+#         chosen_items_text,
+#         f"- **Total Cost**: ₹{chosen['total_cost']:.0f}",
+#         f"- **Predicted Protein**: {chosen['total_protein']:.1f}g (Target: {protein_target:.0f}g)",
+#         f"- **Left in Budget**: ₹{left_in_budget:.0f}",
+#     ]
+
+#     if status == "GOAL_MET" and best_combo and best_combo["items"] != chosen["items"]:
+#         lines.append("\n**Alternative (Maximum Protein within Budget)**:")
+#         alt_items_text = "\n".join(
+#             format_item_line(i) for i in best_combo["item_details"]
+#         )
+#         lines.append(alt_items_text)
+#         lines.append(
+#             f"- Cost: ₹{best_combo['total_cost']:.0f} | Protein: {best_combo['total_protein']:.1f}g | Left in Budget: ₹{budget - best_combo['total_cost']:.0f}"
+#         )
+
+#     recommendation = "\n".join(lines)
+#     return {"recommendation": recommendation}
 
 
 # ── Build the Graph ─────────────────────────────────────────────────────────
