@@ -1,9 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { Activity, Loader2, Lock, Mail } from "lucide-react";
-import { signIn } from "@/hooks/use-auth";
 import { loginApi, ApiError } from "@/lib/api";
-import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
 import { SignupPopover } from "@/components/site/SignupPopover";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
@@ -13,14 +11,12 @@ export const Route = createFileRoute("/login")({
       { title: "Sign in — nutriX Restro" },
       {
         name: "description",
-        content:
-          "Sign in to nutriX Restro to access your dashboards, charts, and data workflows.",
+        content: "Sign in to nutriX Restro to access your dashboards, charts, and data workflows.",
       },
       { property: "og:title", content: "Sign in — nutriX Restro" },
       {
         property: "og:description",
-        content:
-          "Sign in to nutriX Restro to access your dashboards, charts, and data workflows.",
+        content: "Sign in to nutriX Restro to access your dashboards, charts, and data workflows.",
       },
     ],
   }),
@@ -48,8 +44,6 @@ function LoginPage() {
       setSubmitting(false);
     }
   };
-
-  // Google SSO handled by GoogleSignInButton component below.
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-background">
@@ -115,10 +109,7 @@ function LoginPage() {
               {/* Form */}
               <form onSubmit={handleSubmit} className="mt-8 space-y-5">
                 <div className="space-y-2">
-                  <label
-                    htmlFor="email"
-                    className="text-xs font-medium text-muted-foreground"
-                  >
+                  <label htmlFor="email" className="text-xs font-medium text-muted-foreground">
                     Work Email
                   </label>
                   <div className="relative">
@@ -137,10 +128,7 @@ function LoginPage() {
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <label
-                      htmlFor="password"
-                      className="text-xs font-medium text-muted-foreground"
-                    >
+                    <label htmlFor="password" className="text-xs font-medium text-muted-foreground">
                       Password
                     </label>
                     <a
@@ -164,9 +152,7 @@ function LoginPage() {
                   </div>
                 </div>
 
-                {errorMsg && (
-                  <p className="text-xs text-red-400 -mb-1">{errorMsg}</p>
-                )}
+                {errorMsg && <p className="text-xs text-red-400 -mb-1">{errorMsg}</p>}
                 <button
                   type="submit"
                   disabled={submitting}
@@ -175,20 +161,6 @@ function LoginPage() {
                   {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
                   {submitting ? "Signing in..." : "Sign In"}
                 </button>
-
-                <div className="flex items-center gap-3">
-                  <span className="h-px flex-1 bg-border" />
-                  <span className="text-xs uppercase tracking-wider text-muted-foreground">
-                    or
-                  </span>
-                  <span className="h-px flex-1 bg-border" />
-                </div>
-
-                <GoogleSignInButton
-                  label="Continue with Google"
-                  onSuccess={() => navigate({ to: "/" })}
-                  onError={(msg) => setErrorMsg(msg)}
-                />
               </form>
 
               <p className="mt-6 text-center text-sm text-muted-foreground">
@@ -227,7 +199,7 @@ function LoginPage() {
           NUTRIX
         </span>
       </div>
-      
+
       <SignupPopover open={signupOpen} onClose={() => setSignupOpen(false)} />
     </div>
   );

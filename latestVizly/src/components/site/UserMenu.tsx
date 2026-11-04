@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { LogOut, Users, X } from "lucide-react";
+import { LogOut, UserRound, Users, X } from "lucide-react";
 import type { AuthUser } from "@/hooks/use-auth";
 
 interface UserMenuProps {
@@ -105,16 +105,20 @@ export function UserMenu({ user, onSignOut }: UserMenuProps) {
                 )}
               </div>
               <div className="min-w-0 text-left">
-                <p className="truncate text-sm font-semibold text-foreground">
-                  {user.name}
-                </p>
-                <p className="truncate text-xs text-muted-foreground">
-                  {user.email}
-                </p>
+                <p className="truncate text-sm font-semibold text-foreground">{user.name}</p>
+                <p className="truncate text-xs text-muted-foreground">{user.email}</p>
               </div>
             </div>
 
             <div className="relative mt-5 space-y-2.5">
+              <MenuButton
+                icon={<UserRound className="h-4 w-4" />}
+                label="Manage profile"
+                onClick={() => {
+                  setOpen(false);
+                  navigate({ to: "/profile" });
+                }}
+              />
               <MenuButton
                 icon={<Users className="h-4 w-4" />}
                 label="Switch Account"

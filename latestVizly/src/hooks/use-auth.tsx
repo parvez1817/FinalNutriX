@@ -3,6 +3,9 @@ import { useEffect, useState, useCallback } from "react";
 export interface AuthUser {
   name: string;
   email: string;
+  dateOfBirth?: string;
+  weightKg?: number;
+  allergies?: string[];
   avatar?: string;
   provider: "google" | "email";
 }
@@ -32,6 +35,11 @@ function write(user: AuthUser | null) {
 
 export function signIn(user: AuthUser) {
   write(user);
+}
+
+export function updateAuthUser(updates: Partial<AuthUser>) {
+  const currentUser = read();
+  if (currentUser) write({ ...currentUser, ...updates });
 }
 
 export function signOut() {

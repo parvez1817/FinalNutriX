@@ -9,22 +9,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import hashlib
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import sys
 import uuid
 import bcrypt
 
 import motor.motor_asyncio
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 from pymongo.errors import PyMongoError
 
@@ -41,6 +44,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="NutriX API")
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @app.exception_handler(PyMongoError)
@@ -62,6 +66,30 @@ class SignupRequest(BaseModel):
     name: str = ""
     email: str
     password: str
+    date_of_birth: date
+    weight_kg: float = Field(gt=0, le=500)
+    allergies: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def validate_date_of_birth(cls, value: date) -> date:
+        if value > date.today():
+            raise ValueError("Date of birth cannot be in the future")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Name cannot be empty")
+        return value
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if len(value) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return value
 
 class LoginRequest(BaseModel):
     email: str
@@ -91,6 +119,51 @@ class ConversationRequest(BaseModel):
     messages: list[dict] = Field(default_factory=list)
 
 
+class ProfileUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    date_of_birth: date
+    weight_kg: float = Field(gt=0, le=500)
+    allergies: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def validate_date_of_birth(cls, value: date) -> date:
+        if value > date.today():
+            raise ValueError("Date of birth cannot be in the future")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Name cannot be empty")
+        return value
+
+
+def normalize_allergies(allergies: list[str]) -> list[str]:
+    normalized = []
+    seen = set()
+    for allergy in allergies:
+        term = allergy.strip()
+        key = term.casefold()
+        if term and key not in {"none", "n/a", "na"} and key not in seen:
+            normalized.append(term)
+            seen.add(key)
+    return normalized
+
+
+async def authenticated_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> dict:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    token_hash = hashlib.sha256(credentials.credentials.encode("utf-8")).hexdigest()
+    user = await users_collection.find_one({"auth_token_hash": token_hash})
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return user
+
+
 # ── LLM for image recognition ──────────────────────────────────────────────
 vision_llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
@@ -107,7 +180,10 @@ def sse_event(event: str, data: dict | str) -> str:
 
 # ── Optimize endpoint (SSE stream) ─────────────────────────────────────────
 @app.post("/api/optimize")
-async def optimize(request: OptimizeRequest):
+async def optimize(
+    request: OptimizeRequest,
+    user: dict = Depends(authenticated_user),
+):
     """Stream the optimization pipeline as SSE events."""
 
     async def event_stream():
@@ -121,6 +197,7 @@ async def optimize(request: OptimizeRequest):
             "budget": request.budget,
             "protein_target": request.protein_target,
             "dietary_preference": request.dietary_preference,
+            "allergies": normalize_allergies(user.get("allergies") or []),
             "protein_estimates": {},
             "valid_combinations": [],
             "best_combination": None,
@@ -133,9 +210,12 @@ async def optimize(request: OptimizeRequest):
             try:
                 async for graph_event in graph.astream(user_input, config=config):
                     yield graph_event
+            except ValueError as exc:
+                logger.info("Optimization request could not be completed: %s", exc)
+                yield {"__error__": str(exc)}
             except Exception:
                 logger.exception("Optimization graph failed")
-                yield {"__error__": True}
+                yield {"__error__": "Optimization failed. Check the backend logs for details."}
 
         # Stream status messages without adding artificial latency.
         yield sse_event("status", {"step": "typing", "message": "🔍 Typing..."})
@@ -146,7 +226,7 @@ async def optimize(request: OptimizeRequest):
             if event.get("__error__"):
                 yield sse_event(
                     "error",
-                    "Optimization failed. Check the backend logs for details.",
+                    event["__error__"],
                 )
                 return
 
@@ -203,12 +283,24 @@ async def optimize(request: OptimizeRequest):
 
 # ── Chat endpoint ──────────────────────────────────────────────────────────
 @app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(
+    request: ChatRequest,
+    user: dict = Depends(authenticated_user),
+):
     """Handle conversational follow-ups via LLM."""
     sys_prompt = "You are NutriX, a helpful nutrition AI assistant."
+    allergies = normalize_allergies(user.get("allergies") or [])
     if request.context:
         sys_prompt += f"\n\nCurrent Session Context: Budget: ₹{request.context.get('budget', '?')}, Protein Target: {request.context.get('protein_target', '?')}g. Menu provided: {request.context.get('menu', '?')}."
-        
+
+    if allergies:
+        sys_prompt += (
+            "\n\nFood allergy safety constraint: never recommend or include food items "
+            "containing these user-reported allergens: "
+            + ", ".join(allergies)
+            + ". If ingredients are unclear, advise the user to confirm with the restaurant."
+        )
+
     langchain_msgs = [SystemMessage(content=sys_prompt)]
     
     for msg in request.messages:
@@ -312,6 +404,35 @@ db = client.nutriX
 users_collection = db.users
 conversations_collection = db.conversations
 
+
+def profile_response(user: dict) -> dict:
+    date_of_birth_value = user.get("date_of_birth")
+    age = None
+    if date_of_birth_value:
+        date_of_birth = date.fromisoformat(date_of_birth_value)
+        today = date.today()
+        age = today.year - date_of_birth.year - (
+            (today.month, today.day) < (date_of_birth.month, date_of_birth.day)
+        )
+    return {
+        "name": user.get("name", ""),
+        "email": user["email"],
+        "dateOfBirth": date_of_birth_value,
+        "weightKg": user.get("weight_kg"),
+        "age": age,
+        "allergies": user.get("allergies", []),
+    }
+
+
+async def issue_auth_token(user_id) -> str:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    await users_collection.update_one(
+        {"_id": user_id},
+        {"$set": {"auth_token_hash": token_hash}},
+    )
+    return token
+
 @app.post("/api/auth/signup")
 async def register(req: SignupRequest):
     existing = await users_collection.find_one({"email": req.email})
@@ -322,13 +443,17 @@ async def register(req: SignupRequest):
     new_user = {
         "name": req.name,
         "email": req.email,
-        "password": hashed_pwd
+        "password": hashed_pwd,
+        "date_of_birth": req.date_of_birth.isoformat(),
+        "weight_kg": req.weight_kg,
+        "allergies": normalize_allergies(req.allergies),
     }
-    await users_collection.insert_one(new_user)
+    result = await users_collection.insert_one(new_user)
+    token = await issue_auth_token(result.inserted_id)
     
     return {
-        "token": str(uuid.uuid4()),
-        "user": {"email": req.email, "name": req.name}
+        "token": token,
+        "user": profile_response(new_user),
     }
 
 @app.post("/api/auth/login")
@@ -340,10 +465,28 @@ async def login_route(req: LoginRequest):
     if not bcrypt.checkpw(req.password.encode('utf-8'), user["password"].encode('utf-8')):
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
-    return {
-        "token": str(uuid.uuid4()),
-        "user": {"email": user["email"], "name": user.get("name", "")}
+    token = await issue_auth_token(user["_id"])
+    return {"token": token, "user": profile_response(user)}
+
+
+@app.get("/api/auth/profile")
+async def get_profile(user: dict = Depends(authenticated_user)):
+    return profile_response(user)
+
+
+@app.put("/api/auth/profile")
+async def update_profile(
+    req: ProfileUpdateRequest,
+    user: dict = Depends(authenticated_user),
+):
+    updated = {
+        "name": req.name.strip(),
+        "date_of_birth": req.date_of_birth.isoformat(),
+        "weight_kg": req.weight_kg,
+        "allergies": normalize_allergies(req.allergies),
     }
+    await users_collection.update_one({"_id": user["_id"]}, {"$set": updated})
+    return profile_response({**user, **updated})
 
 
 @app.get("/api/conversations")

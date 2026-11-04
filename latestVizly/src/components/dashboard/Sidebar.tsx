@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { EllipsisVertical, LogOut, Search, SquarePen, Trash2 } from "lucide-react";
+import { EllipsisVertical, LogOut, Search, SquarePen, Trash2, UserRound } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -257,6 +257,18 @@ export const Sidebar = ({
             role="menu"
             className="absolute bottom-16 right-3 left-3 z-50 rounded-lg border border-border bg-popover p-1 shadow-xl"
           >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setAccountMenuOpen(false);
+                void navigate({ to: "/profile" });
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent"
+            >
+              <UserRound className="h-4 w-4" />
+              Manage profile
+            </button>
             <button
               type="button"
               role="menuitem"

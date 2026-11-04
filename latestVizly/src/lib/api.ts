@@ -1,4 +1,4 @@
-import { signIn } from "@/hooks/use-auth";
+import { signIn, updateAuthUser } from "@/hooks/use-auth";
 import type { FoodItem } from "@/lib/nutrix";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -68,16 +68,44 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export type AuthResponse = {
   token: string;
-  user: { email: string; name?: string };
+  user: {
+    email: string;
+    name?: string;
+    dateOfBirth: string | null;
+    weightKg: number | null;
+    age: number | null;
+    allergies: string[];
+  };
 };
 
-export async function signupApi(input: { email: string; password: string; name?: string }) {
+export async function signupApi(input: {
+  email: string;
+  password: string;
+  name?: string;
+  dateOfBirth: string;
+  weightKg: number;
+  allergies: string[];
+}) {
   const data = await request<AuthResponse>("/api/auth/signup", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      email: input.email,
+      password: input.password,
+      name: input.name,
+      date_of_birth: input.dateOfBirth,
+      weight_kg: input.weightKg,
+      allergies: input.allergies,
+    }),
   });
   setToken(data.token);
-  signIn({ email: data.user.email, name: data.user.name || data.user.email, provider: "email" });
+  signIn({
+    email: data.user.email,
+    name: data.user.name || data.user.email,
+    ...(data.user.dateOfBirth ? { dateOfBirth: data.user.dateOfBirth } : {}),
+    ...(data.user.weightKg != null ? { weightKg: data.user.weightKg } : {}),
+    allergies: data.user.allergies ?? [],
+    provider: "email",
+  });
   return data;
 }
 
@@ -87,8 +115,52 @@ export async function loginApi(input: { email: string; password: string }) {
     body: JSON.stringify(input),
   });
   setToken(data.token);
-  signIn({ email: data.user.email, name: data.user.name || data.user.email, provider: "email" });
+  signIn({
+    email: data.user.email,
+    name: data.user.name || data.user.email,
+    ...(data.user.dateOfBirth ? { dateOfBirth: data.user.dateOfBirth } : {}),
+    ...(data.user.weightKg != null ? { weightKg: data.user.weightKg } : {}),
+    allergies: data.user.allergies ?? [],
+    provider: "email",
+  });
   return data;
+}
+
+export type UserProfile = {
+  name: string;
+  email: string;
+  dateOfBirth: string | null;
+  weightKg: number | null;
+  age: number | null;
+  allergies: string[];
+};
+
+export function getProfileApi() {
+  return request<UserProfile>("/api/auth/profile");
+}
+
+export async function updateProfileApi(input: {
+  name: string;
+  dateOfBirth: string;
+  weightKg: number;
+  allergies: string[];
+}) {
+  const profile = await request<UserProfile>("/api/auth/profile", {
+    method: "PUT",
+    body: JSON.stringify({
+      name: input.name,
+      date_of_birth: input.dateOfBirth,
+      weight_kg: input.weightKg,
+      allergies: input.allergies,
+    }),
+  });
+  updateAuthUser({
+    name: profile.name,
+    dateOfBirth: profile.dateOfBirth ?? undefined,
+    weightKg: profile.weightKg ?? undefined,
+    allergies: profile.allergies,
+  });
+  return profile;
 }
 
 export type ConversationSummary = {
@@ -220,26 +292,6 @@ export async function subscribeApi(input: { email: string; source?: string }) {
     method: "POST",
     body: JSON.stringify(input),
   });
-}
-
-export type GoogleAuthResponse = {
-  token: string;
-  user: { email: string; name?: string; picture?: string; provider: "google" };
-};
-
-export async function googleSignInApi(credential: string) {
-  const data = await request<GoogleAuthResponse>("/api/auth/google", {
-    method: "POST",
-    body: JSON.stringify({ credential }),
-  });
-  setToken(data.token);
-  signIn({
-    email: data.user.email,
-    name: data.user.name || data.user.email,
-    avatar: data.user.picture,
-    provider: "google",
-  });
-  return data;
 }
 
 export async function recognizeFoodMenuApi(file: File) {

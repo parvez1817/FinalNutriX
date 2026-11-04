@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { toast } from "sonner";
+import { getToken } from "@/lib/api";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
@@ -138,9 +139,13 @@ function DashboardPage() {
           language: payload.language ?? "English",
         });
 
+        const token = getToken();
         const res = await fetch("/api/optimize", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body,
         });
 
@@ -327,9 +332,13 @@ function DashboardPage() {
               : null,
         });
 
+        const token = getToken();
         const res = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
           body,
         });
 
